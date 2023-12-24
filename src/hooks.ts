@@ -9,7 +9,246 @@ import { config } from "../package.json";
 import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
+import { PDFDocument } from 'pdf-lib';
 
+
+
+
+function checkForDigiVatLib(input: string): { processed: boolean; result: string } {
+  if (input.includes(" | DigiVatLib")) {
+
+    let processedString = input
+    // If " | DigiVatLib" exists, remove it
+    const indexOfDigiVatLib = input.indexOf(" | DigiVatLib");
+    if (indexOfDigiVatLib !== -1) {
+      processedString = processedString.substring(0, indexOfDigiVatLib);
+    }
+    // If the " | DigiVatLib" part exists, insert a whitespace after each "."
+    processedString = processedString.replace(/\./g, '. ');
+
+    processedString = "Vatikan, BAV, " + processedString
+
+    return { processed: true, result: processedString };
+  } else {
+    // If " | DigiVatLib" does not exist, return the original string
+    return { processed: false, result: input };
+  }
+}
+
+async function fetch(url: string): Promise<string>{
+    const request = await Zotero.HTTP.request('GET', url);
+    if (request.status !== 200) {
+        ztoolkit.log('Failed to fetch data from the link');
+    }
+    ztoolkit.log("response from \"" + url + "\": " + (request.response))
+    return request.response
+}
+
+async function fetchIIIFManifestURL(itemUrl: string): Promise<string> {
+  ztoolkit.log("fetching IIIF manuscript url")
+    const htmlSource = await fetch(itemUrl)
+    ztoolkit.log("fetched webpage:")
+    ztoolkit.log(htmlSource)
+    const match = htmlSource.match(/"iiif_manifest_url":\s*"([^"]+)"/);
+    ztoolkit.log("match found")
+    return match ? match[1] : "null";
+}
+
+async function fetchManifest(url: string): Promise<any> {
+    const manifest = await fetch(url);
+    const object = JSON.parse(manifest)
+    ztoolkit.log("retrieved manifest object: " + object) 
+    return object
+}
+function extractImageUrls(manifest: any) : Array<string>{
+    return manifest.sequences[0].canvases.map((canvas: any) => {
+        const service = canvas.images[0].resource.service;
+        if (service) {
+            // Construct the URL for the full resolution image
+            return service['@id'] + '/full/full/0/default.jpg';
+        }
+        return null; // or handle this case as needed
+    }).filter((url:string) => url !== null); // Filter out any null URLs
+}
+
+async function createPdfDownloadDialog(totalNumPages: number): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const pdfDialogData: { startPage: number; endPage: number } = {
+      startPage: 0,
+      endPage: totalNumPages
+    };
+
+    const pdfDialogHelper = new ztoolkit.Dialog(4, 2)
+      .addCell(0, 0, {
+        tag: "h1",
+        properties: { innerHTML: "PDF Download" },
+      })
+      .addCell(1, 0, {
+        tag: "label",
+        namespace: "html",
+        attributes: { for: "start-page-input" },
+        properties: { innerHTML: "Start Page:" },
+      })
+      .addCell(1, 1, {
+        tag: "input",
+        namespace: "html",
+        id: "start-page-input",
+        attributes: {
+          "data-bind": "startPage",
+          "data-prop": "value",
+          type: "number",
+          min: "1"
+        }
+      })
+      .addCell(2, 0, {
+        tag: "label",
+        namespace: "html",
+        attributes: { for: "end-page-input" },
+        properties: { innerHTML: "End Page:" },
+      })
+      .addCell(2, 1, {
+        tag: "input",
+        namespace: "html",
+        id: "end-page-input",
+        attributes: {
+          "data-bind": "endPage",
+          "data-prop": "value",
+          type: "number",
+          min: "1"
+        }
+      })
+      .addButton("Done", "done", {
+        callback: () => {
+          // Implement logic here for handling the PDF download
+          ztoolkit.log(`Download PDF from page ${pdfDialogData.startPage} to ${pdfDialogData.endPage}`);
+          if(pdfDialogData.startPage < 0){
+            pdfDialogData.startPage = 0
+          }
+          if(pdfDialogData.endPage > totalNumPages){
+            pdfDialogData.endPage = totalNumPages
+          }
+          addon.data.dialog = undefined;
+          resolve(pdfDialogData)
+        },
+      })
+      .setDialogData(pdfDialogData)
+      .open("PDF Download Dialog");
+
+    addon.data.dialog = pdfDialogHelper;
+
+    })
+}
+
+
+
+async function addImageToPDF(url: string, pdfDoc: PDFDocument) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url);
+    xhr.responseType = 'blob'; // Fetch the image as a blob
+
+    xhr.onload = async () => {
+      if (xhr.status === 200) {
+        const blob = xhr.response;
+        const arrayBuffer = await blob.arrayBuffer(); // Convert blob to arrayBuffer
+        const image = await pdfDoc.embedJpg(arrayBuffer); // Embed image in the PDF
+        const page = pdfDoc.addPage();
+        page.drawImage(image, {
+          x: 0,
+          y: 0,
+          width: page.getWidth(),
+          height: page.getHeight(),
+        });
+        resolve(pdfDoc);
+      } else {
+        reject('Image load failed');
+      }
+    };
+
+    xhr.onerror = () => {
+      reject('Network error');
+    };
+
+    xhr.send();
+  });
+}
+
+const b64toBlob = (b64Data: string, contentType='', sliceSize=512) => {
+  const byteCharacters = atob(b64Data);
+  const byteArrays = [];
+
+  for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
+    const slice = byteCharacters.slice(offset, offset + sliceSize);
+
+    const byteNumbers = new Array(slice.length);
+    for (let i = 0; i < slice.length; i++) {
+      byteNumbers[i] = slice.charCodeAt(i);
+    }
+
+    const byteArray = new Uint8Array(byteNumbers);
+    byteArrays.push(byteArray);
+  }
+    
+  const blob = new Blob(byteArrays, {type: contentType});
+  return blob;
+}
+
+async function downloadImagesAsPDF(urls: Array<string>, pdfTargetDirectory: nsIFile, manuscriptName: string){
+  const popup = new ztoolkit.ProgressWindow(manuscriptName, {
+    closeOnClick: true,
+    closeTime: -1,
+  }).createLine({
+      text: "Starting to download…",
+      type: "default",
+      progress: 0,
+    })
+    .show();
+
+
+  const pdfDoc = await PDFDocument.create();
+  let counter = 0
+  for (const url of urls) {
+    try {
+      ztoolkit.log("now downloading no. " + counter +": " + url)
+       popup.changeLine({
+        text: "Now downloading image no. " + counter + " out of " + urls.length + "…",
+        type: "default",
+        progress: (counter / urls.length) * 90
+      })
+      await addImageToPDF(url, pdfDoc)
+      ztoolkit.log("added image no. " + counter)
+      counter += 1
+    } catch (error) {
+      ztoolkit.log((error as Error).message)
+      break
+    }
+  }
+  popup.changeLine({
+        text: "Finished downloading images, now creating pdf. This may take a while…",
+        type: "default",
+        progress: 90
+      })
+  const pdfB64 = await pdfDoc.saveAsBase64()
+  popup.changeLine({
+        text: "Finished creating pdf, now saving…",
+        type: "default",
+        progress: 95
+      })
+  ztoolkit.log("pdf base64!")
+  try {
+
+  await Zotero.File.putContentsAsync(pdfTargetDirectory, b64toBlob(pdfB64, 'application/pdf'))
+  popup.changeLine({
+        text: "Finished!",
+        type: "default",
+        progress: 100
+      })
+  popup.startCloseTimer(5000)
+  ztoolkit.log("saved file at: " + pdfTargetDirectory.path)
+  } catch (error) {
+    ztoolkit.log((error as Error).message)
+  }
+}
 
 async function importPdfToZotero(filePath: string, parentItemId: number): Promise<Zotero.Item> {
   
@@ -30,23 +269,6 @@ async function importPdfToZotero(filePath: string, parentItemId: number): Promis
     }
 }
 
-function checkForDigiVatLib(input: string): { processed: boolean; result: string } {
-  if (input.includes(" | DigiVatLib")) {
-    // If the " | DigiVatLib" part exists, insert a whitespace after each "."
-    const processedString = input.replace(/\./g, '. ');
-    // If " | DigiVatLib" exists, remove it
-    const indexOfDigiVatLib = input.indexOf(" | DigiVatLib");
-    if (indexOfDigiVatLib !== -1) {
-      input = input.substring(0, indexOfDigiVatLib);
-    }
-
-    return { processed: true, result: processedString };
-  } else {
-    // If " | DigiVatLib" does not exist, return the original string
-    return { processed: false, result: input };
-  }
-}
-
 
 async function onAdd(id: number) {
   const item = Zotero.Items.get(id)
@@ -55,9 +277,9 @@ async function onAdd(id: number) {
 
   const { processed: isDigiVatLib, result: newName } = checkForDigiVatLib(itemName);
 
-  if(isDigiVatLib){
+  if(isDigiVatLib && !item.isAttachment()){
     ztoolkit.log("item is digi vat lib item")
-    item.setType(24); // 24 = manuscript
+    item.setType(9); // 24 = manuscript
     item.setField("title", newName)
     item.saveTx()
     const url = item.getField("url") as string
@@ -69,9 +291,10 @@ async function onAdd(id: number) {
     const imageLinks = extractImageUrls(manifest) as Array<string>
     ztoolkit.log("image link example: " + imageLinks[0])
     const pdfnsIFile = (await Zotero.Attachments.createTemporaryStorageDirectory())
-    pdfnsIFile.append("manuscript.pdf")
+    pdfnsIFile.append(newName + ".pdf")
     ztoolkit.log("pdf file path: " + pdfnsIFile.path)
-    await downloadImagesAsPDF(imageLinks, pdfnsIFile, newName)
+    const downloadInfo = await createPdfDownloadDialog(imageLinks.length)
+    await downloadImagesAsPDF(imageLinks.slice(downloadInfo.startPage, downloadInfo.endPage), pdfnsIFile, newName)
     const attachment = await importPdfToZotero(pdfnsIFile.path, item.id)
     attachment.saveTx()
     item.saveTx()
@@ -95,14 +318,11 @@ async function onStartup() {
     const loadDevToolWhen = `Plugin ${config.addonID} startup`;
     ztoolkit.log(loadDevToolWhen);
   }
-
-  initLocale();
-
-  BasicExampleFactory.registerPrefs();
-
+  
+  //important, leave!
   BasicExampleFactory.registerNotifier();
 
-  KeyExampleFactory.registerShortcuts();
+  initLocale();
 
   await onMainWindowLoad(window);
 }
@@ -110,6 +330,7 @@ async function onStartup() {
 async function onMainWindowLoad(win: Window): Promise<void> {
   // Create ztoolkit for every window
   addon.data.ztoolkit = createZToolkit();
+
 }
 
 async function onMainWindowUnload(win: Window): Promise<void> {
@@ -141,15 +362,6 @@ async function onNotify(
   }
   // You can add your code to the corresponding notify type
   ztoolkit.log("notify", event, type, ids, extraData);
-  if (
-    event == "select" &&
-    type == "tab" &&
-    extraData[ids[0]].type == "reader"
-  ) {
-    BasicExampleFactory.exampleNotifierCallback();
-  } else {
-    return;
-  }
 }
 
 /**
@@ -218,170 +430,3 @@ export default {
   onShortcuts,
   onDialogEvents,
 };
-
-import { PDFDocument } from 'pdf-lib';
-import * as fs from 'fs'
-import ZoteroToolkit from "zotero-plugin-toolkit";
-
-async function fetch(url: string): Promise<string>{
-    const request = await Zotero.HTTP.request('GET', url);
-    if (request.status !== 200) {
-        ztoolkit.log('Failed to fetch data from the link');
-    }
-    ztoolkit.log("response from \"" + url + "\": " + (request.response))
-    return request.response
-}
-
-async function fetchIIIFManifestURL(itemUrl: string): Promise<string> {
-  ztoolkit.log("fetching IIIF manuscript url")
-    const htmlSource = await fetch(itemUrl)
-    ztoolkit.log("fetched webpage:")
-    ztoolkit.log(htmlSource)
-    const match = htmlSource.match(/"iiif_manifest_url":\s*"([^"]+)"/);
-    ztoolkit.log("match found")
-    return match ? match[1] : "null";
-}
-
-async function fetchManifest(url: string): Promise<any> {
-    const manifest = await fetch(url);
-    const object = JSON.parse(manifest)
-    ztoolkit.log("retrieved manifest object: " + object) 
-    return object
-}
-function extractImageUrls(manifest: any) : Array<string>{
-    return manifest.sequences[0].canvases.map((canvas: any) => {
-        const service = canvas.images[0].resource.service;
-        if (service) {
-            // Construct the URL for the full resolution image
-            return service['@id'] + '/full/full/0/default.jpg';
-        }
-        return null; // or handle this case as needed
-    }).filter((url:string) => url !== null); // Filter out any null URLs
-}
-
-function stringToArrayBuffer(str: string): Uint8Array {
-    // Create a byte array
-    const byteArray = new Uint8Array(str.length);
-    for (let i = 0; i < str.length; i++) {
-        // Convert each character to its byte value
-        byteArray[i] = str.charCodeAt(i);
-    }
-    ztoolkit.log(byteArray)
-    return byteArray;
-}
-
-async function addImageToPDF(url: string, pdfDoc: PDFDocument) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', url);
-    xhr.responseType = 'blob'; // Fetch the image as a blob
-
-    xhr.onload = async () => {
-      if (xhr.status === 200) {
-        const blob = xhr.response;
-        const arrayBuffer = await blob.arrayBuffer(); // Convert blob to arrayBuffer
-        const image = await pdfDoc.embedJpg(arrayBuffer); // Embed image in the PDF
-        const page = pdfDoc.addPage();
-        page.drawImage(image, {
-          x: 0,
-          y: 0,
-          width: page.getWidth(),
-          height: page.getHeight(),
-        });
-        resolve(pdfDoc);
-      } else {
-        reject('Image load failed');
-      }
-    };
-
-    xhr.onerror = () => {
-      reject('Network error');
-    };
-
-    xhr.send();
-  });
-}
-
-
-
-
-
-async function downloadImagesAsPDF(urls: Array<string>, pdfTargetDirectory: nsIFile, manuscriptName: string){
-  const popup = new ztoolkit.ProgressWindow(manuscriptName, {
-    closeOnClick: true,
-    closeTime: -1,
-  }).createLine({
-      text: "Starting to download…",
-      type: "default",
-      progress: 0,
-    })
-    .show();
-
-
-  const pdfDoc = await PDFDocument.create();
-  let counter = 0
-  for (const url of urls) {
-    try {
-      ztoolkit.log("now downloading no. " + counter +": " + url)
-       popup.changeLine({
-        text: "Now downloading image no. " + counter + " out of " + urls.length + "…",
-        type: "default",
-        progress: (counter / urls.length) * 90
-      })
-      await addImageToPDF(url, pdfDoc)
-      ztoolkit.log("added image no. " + counter)
-      counter += 1
-    } catch (error) {
-      ztoolkit.log((error as Error).message)
-      break
-    }
-  }
-  popup.changeLine({
-        text: "Finished downloading images, now creating pdf. This may take a while…",
-        type: "default",
-        progress: 90
-      })
-  const pdfB64 = await pdfDoc.saveAsBase64()
-  popup.changeLine({
-        text: "Finished creating pdf, now saving…",
-        type: "default",
-        progress: 95
-      })
-  ztoolkit.log("pdf base64!")
-  try {
-
-  await Zotero.File.putContentsAsync(pdfTargetDirectory, b64toBlob(pdfB64, 'application/pdf'))
-  popup.changeLine({
-        text: "Finished!",
-        type: "default",
-        progress: 100
-      })
-  popup.startCloseTimer(5000)
-  ztoolkit.log("saved file at: " + pdfTargetDirectory.path)
-  } catch (error) {
-    ztoolkit.log((error as Error).message)
-  }
-}
-
-
-const b64toBlob = (b64Data: string, contentType='', sliceSize=512) => {
-  const byteCharacters = atob(b64Data);
-  const byteArrays = [];
-
-  for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
-    const slice = byteCharacters.slice(offset, offset + sliceSize);
-
-    const byteNumbers = new Array(slice.length);
-    for (let i = 0; i < slice.length; i++) {
-      byteNumbers[i] = slice.charCodeAt(i);
-    }
-
-    const byteArray = new Uint8Array(byteNumbers);
-    byteArrays.push(byteArray);
-  }
-    
-  const blob = new Blob(byteArrays, {type: contentType});
-  return blob;
-}
-
-
