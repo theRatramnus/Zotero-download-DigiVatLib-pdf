@@ -14,5 +14,5 @@ When you've done that just navigate to a DigiVatLib manuscript's page, like this
 The plugin struggles with huge pdf files (like 700 pages), but works fine with samller sizes (like 250 pages). Consider downloading multiple smaller chunks and combining them into one pdf after the fact.
 
 ## Credits
-- This plugin wouldn't have been possible without @winningwind's great [Zotero Plugin Template](https://github.com/windingwind/zotero-plugin-template) and [Zotero Types](https://github.com/windingwind/zotero-types) repositories. Thank you so much :)
+- This plugin wouldn't have been possible without @windingwind's great [Zotero Plugin Template](https://github.com/windingwind/zotero-plugin-template) and [Zotero Types](https://github.com/windingwind/zotero-types) repositories. Thank you so much :)
 - Also a huge thanks to @Hopding for his [pdf-lib](https://github.com/Hopding/pdf-lib)!
