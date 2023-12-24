@@ -34,6 +34,12 @@ function checkForDigiVatLib(input: string): { processed: boolean; result: string
   if (input.includes(" | DigiVatLib")) {
     // If the " | DigiVatLib" part exists, insert a whitespace after each "."
     const processedString = input.replace(/\./g, '. ');
+    // If " | DigiVatLib" exists, remove it
+    const indexOfDigiVatLib = input.indexOf(" | DigiVatLib");
+    if (indexOfDigiVatLib !== -1) {
+      input = input.substring(0, indexOfDigiVatLib);
+    }
+
     return { processed: true, result: processedString };
   } else {
     // If " | DigiVatLib" does not exist, return the original string
@@ -51,6 +57,9 @@ async function onAdd(id: number) {
 
   if(isDigiVatLib){
     ztoolkit.log("item is digi vat lib item")
+    item.setType(24); // 24 = manuscript
+    item.setField("title", newName)
+    item.saveTx()
     const url = item.getField("url") as string
     const manifestURL = await fetchIIIFManifestURL(url) as string
     ztoolkit.log("manifest url: " + manifestURL)
@@ -62,11 +71,9 @@ async function onAdd(id: number) {
     const pdfnsIFile = (await Zotero.Attachments.createTemporaryStorageDirectory())
     pdfnsIFile.append("manuscript.pdf")
     ztoolkit.log("pdf file path: " + pdfnsIFile.path)
-    await downloadImagesAsPDF(imageLinks, pdfnsIFile)
+    await downloadImagesAsPDF(imageLinks, pdfnsIFile, newName)
     const attachment = await importPdfToZotero(pdfnsIFile.path, item.id)
     attachment.saveTx()
-    item.setType(24); // 24 = manuscript
-    item.setField("title", newName)
     item.saveTx()
     ztoolkit.log(item)
   }
@@ -89,8 +96,6 @@ async function onStartup() {
     ztoolkit.log(loadDevToolWhen);
   }
 
-  onAdd(8890);
-
   initLocale();
 
   BasicExampleFactory.registerPrefs();
@@ -105,57 +110,6 @@ async function onStartup() {
 async function onMainWindowLoad(win: Window): Promise<void> {
   // Create ztoolkit for every window
   addon.data.ztoolkit = createZToolkit();
-
-  const popupWin = new ztoolkit.ProgressWindow(config.addonName, {
-    closeOnClick: true,
-    closeTime: -1,
-  })
-    .createLine({
-      text: getString("startup-begin"),
-      type: "default",
-      progress: 0,
-    })
-    .show();
-
-  await Zotero.Promise.delay(1000);
-  popupWin.changeLine({
-    progress: 30,
-    text: `[30%] ${getString("startup-begin")}`,
-  });
-
-  UIExampleFactory.registerStyleSheet();
-
-  UIExampleFactory.registerRightClickMenuItem();
-
-  UIExampleFactory.registerRightClickMenuPopup();
-
-  UIExampleFactory.registerWindowMenuWithSeparator();
-
-  await UIExampleFactory.registerExtraColumn();
-
-  await UIExampleFactory.registerExtraColumnWithCustomCell();
-
-  await UIExampleFactory.registerCustomItemBoxRow();
-
-  UIExampleFactory.registerLibraryTabPanel();
-
-  await UIExampleFactory.registerReaderTabPanel();
-
-  PromptExampleFactory.registerNormalCommandExample();
-
-  PromptExampleFactory.registerAnonymousCommandExample();
-
-  PromptExampleFactory.registerConditionalCommandExample();
-
-  await Zotero.Promise.delay(1000);
-
-  popupWin.changeLine({
-    progress: 100,
-    text: `[100%] ${getString("startup-finish")}`,
-  });
-  popupWin.startCloseTimer(5000);
-
-  addon.hooks.onDialogEvents("dialogExample");
 }
 
 async function onMainWindowUnload(win: Window): Promise<void> {
@@ -267,6 +221,7 @@ export default {
 
 import { PDFDocument } from 'pdf-lib';
 import * as fs from 'fs'
+import ZoteroToolkit from "zotero-plugin-toolkit";
 
 async function fetch(url: string): Promise<string>{
     const request = await Zotero.HTTP.request('GET', url);
@@ -351,12 +306,28 @@ async function addImageToPDF(url: string, pdfDoc: PDFDocument) {
 
 
 
-async function downloadImagesAsPDF(urls: Array<string>, pdfTargetDirectory: nsIFile){
+async function downloadImagesAsPDF(urls: Array<string>, pdfTargetDirectory: nsIFile, manuscriptName: string){
+  const popup = new ztoolkit.ProgressWindow(manuscriptName, {
+    closeOnClick: true,
+    closeTime: -1,
+  }).createLine({
+      text: "Starting to download…",
+      type: "default",
+      progress: 0,
+    })
+    .show();
+
+
   const pdfDoc = await PDFDocument.create();
   let counter = 0
   for (const url of urls) {
     try {
       ztoolkit.log("now downloading no. " + counter +": " + url)
+       popup.changeLine({
+        text: "Now downloading image no. " + counter + " out of " + urls.length + "…",
+        type: "default",
+        progress: (counter / urls.length) * 90
+      })
       await addImageToPDF(url, pdfDoc)
       ztoolkit.log("added image no. " + counter)
       counter += 1
@@ -365,11 +336,27 @@ async function downloadImagesAsPDF(urls: Array<string>, pdfTargetDirectory: nsIF
       break
     }
   }
+  popup.changeLine({
+        text: "Finished downloading images, now creating pdf. This may take a while…",
+        type: "default",
+        progress: 90
+      })
   const pdfB64 = await pdfDoc.saveAsBase64()
+  popup.changeLine({
+        text: "Finished creating pdf, now saving…",
+        type: "default",
+        progress: 95
+      })
   ztoolkit.log("pdf base64!")
   try {
 
   await Zotero.File.putContentsAsync(pdfTargetDirectory, b64toBlob(pdfB64, 'application/pdf'))
+  popup.changeLine({
+        text: "Finished!",
+        type: "default",
+        progress: 100
+      })
+  popup.startCloseTimer(5000)
   ztoolkit.log("saved file at: " + pdfTargetDirectory.path)
   } catch (error) {
     ztoolkit.log((error as Error).message)
@@ -396,41 +383,5 @@ const b64toBlob = (b64Data: string, contentType='', sliceSize=512) => {
   const blob = new Blob(byteArrays, {type: contentType});
   return blob;
 }
-
-  /*
-    const pdfDoc = await PDFDocument.create();
-    let counter = 0
-    for (const url of urls) {
-        ztoolkit.log("now downloading: " + url)
-        const request = (await Zotero.HTTP.request('GET', url, {responseType: "arraybuffer", headers: {"Accept": "application/octet-stream"}}));
-        ztoolkit.log("request...")
-        ztoolkit.log(request.status)
-        ztoolkit.log("respnse type...")
-        ztoolkit.log(request.responseType)
-        ztoolkit.log("response...")
-        ztoolkit.log(request as XMLHttpRequest)
-        try {
-          const image = await pdfDoc.embedJpg(request.response as ArrayBuffer);
-          ztoolkit.log("image created")
-        const page = pdfDoc.addPage([image.width, image.height]);
-        page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
-        ztoolkit.log("added pdf page")
-        counter += 1
-        ztoolkit.log("downloaded image no. " + counter)
-        } catch (error) {
-          ztoolkit.log((error as Error).message)
-          break
-        }
-        
-        
-    }
-    const pdfBytes = await pdfDoc.save();
-    ztoolkit.log("craeted pdf bytes")
-    //fs.writeFileSync(outputFilename, pdfBytes);
-    OS.File.makeDir(outputFilename)
-    ztoolkit.log("created pdf directory")
-    OS.File.writeAtomic(outputFilename, pdfBytes)
-    ztoolkit.log("saved pdf")
-}*/
 
 
